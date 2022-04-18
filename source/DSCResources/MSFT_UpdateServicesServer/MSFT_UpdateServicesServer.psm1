@@ -19,6 +19,7 @@
 $script:resourceHelperModulePath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\Modules\DscResource.Common'
 Import-Module -Name $script:resourceHelperModulePath
 $script:localizedData = Get-LocalizedData -DefaultUICulture 'en-US' -FileName 'MSFT_UpdateServicesServer.strings.psd1'
+. "$PSScriptRoot\helpers.ps1"
 
 <#
     .SYNOPSIS
@@ -141,17 +142,22 @@ function Get-TargetResource
 
         Write-Verbose -Message ($script:localizedData.WsusClassifications -f $Classifications)
         Write-Verbose -Message $script:localizedData.GettingWsusProducts
-        if ($Products = @($WsusSubscription.GetUpdateCategories().Title))
+        $tree = Get-WsusProductTree -Server $WsusServer -ByGuid
+        $current = $WsusSubscription.GetUpdateCategories() | ForEach-Object { $_.Id.Guid }
+        if ($current.Count -eq $tree.Keys.Count)
         {
-            if ($null -eq (Compare-Object -ReferenceObject ($Products | Sort-Object -Unique) -DifferenceObject `
-                    (($WsusServer.GetUpdateCategories().Title) | Sort-Object -Unique) -SyncWindow 0))
-            {
-                $Products = @('*')
-            }
+            $Products = @('*')
         }
         else
         {
-            $Products = @('*')
+            $Products = @()
+            foreach ($id in $current)
+            {
+                if ($null -ne $tree[$id])
+                {
+                    $Products += $tree[$id]
+                }
+            }
         }
 
         Write-Verbose -Message ($script:localizedData.WsusProducts -f $Products)
@@ -502,166 +508,164 @@ function Set-TargetResource
         {
             Write-Verbose -Message $script:localizedData.RemovingDefaultInit
             # remove default products & classification
-            foreach ($Product in ($WsusServer.GetSubscription().GetUpdateCategories().Title))
+            foreach ($Product in ($WsusServer.GetSubscription().GetUpdateCategories()))
             {
-                Get-WsusProduct | Where-Object -FilterScript { $_.Product.Title -eq $Product } | `
-                        Set-WsusProduct -Disable
-        }
-
-        foreach ($Classification in `
-            ($WsusServer.GetSubscription().GetUpdateClassifications().ID.Guid))
-        {
-            Get-WsusClassification | Where-Object -FilterScript { $_.Classification.ID -eq $Classification } | `
-                    Set-WsusClassification -Disable
-    }
-
-    if ($Synchronize)
-    {
-        Write-Verbose -Message $script:localizedData.RunningInitSync
-        $WsusServer.GetSubscription().StartSynchronizationForCategoryOnly()
-        while ($WsusServer.GetSubscription().GetSynchronizationStatus() -eq 'Running')
-        {
-            Start-Sleep -Seconds 1
-        }
-
-        if ($WsusServer.GetSubscription().GetSynchronizationHistory()[0].Result -eq 'Succeeded')
-        {
-            Write-Verbose -Message $script:localizedData.InitSyncSuccess
-            $WsusConfiguration.OobeInitialized = $true
-            SaveWsusConfiguration
-        }
-        else
-        {
-            Write-Verbose -Message $script:localizedData.InitSyncFailure
-        }
-    }
-    else
-    {
-        Write-Verbose -Message $script:localizedData.RunningInitOfflineSync
-
-        $TempFile = [IO.Path]::GetTempFileName()
-
-        $CABPath = Join-Path -Path $PSScriptRoot -ChildPath '\WSUS.cab'
-
-        $Arguments = 'import '
-        $Arguments += "`"$CABPath`" $TempFile"
-
-        Write-Verbose -Message ($script:localizedData.WsusUtilArgs -f $Arguments)
-
-        if ($SetupCredential)
-        {
-            $Process = Start-Win32Process -Path $Path -Arguments $Arguments -Credential $SetupCredential
-            Write-Verbose -Message [string]$Process
-            Wait-Win32ProcessEnd -Path $Path -Arguments $Arguments
-        }
-        else
-        {
-            $Process = Start-Win32Process -Path $Path -Arguments $Arguments
-            Write-Verbose -Message [string]$Process
-            Wait-Win32ProcessEnd -Path $Path -Arguments $Arguments
-        }
-
-        $WsusConfiguration.OobeInitialized = $true
-        SaveWsusConfiguration
-    }
-}
-
-# Configure WSUS subscription
-if ($WsusConfiguration.OobeInitialized)
-{
-    $WsusSubscription = $WsusServer.GetSubscription()
-
-    # Products
-    Write-Verbose -Message $script:localizedData.ConfiguringProducts
-    $ProductCollection = New-Object Microsoft.UpdateServices.Administration.UpdateCategoryCollection
-    $AllWsusProducts = $WsusServer.GetUpdateCategories()
-    if ($Products -eq '*')
-    {
-        foreach ($Product in $AllWsusProducts)
-        {
-            $null = $ProductCollection.Add($WsusServer.GetUpdateCategory($Product.Id))
-        }
-    }
-    else
-    {
-        foreach ($Product in $Products)
-        {
-            if ($WsusProduct = $AllWsusProducts | Where-Object -FilterScript { $_.Title -eq $Product })
-            {
-                $null = $ProductCollection.Add($WsusServer.GetUpdateCategory($WsusProduct.Id))
+                Get-WsusProduct | Where-Object -FilterScript { $_.Product.Id -eq $Product.Id } |
+                    Set-WsusProduct -Disable
             }
-        }
-    }
-    $WsusSubscription.SetUpdateCategories($ProductCollection)
 
-    # Classifications
-    Write-Verbose -Message $script:localizedData.ConfiguringClassifications
-    $ClassificationCollection = New-Object Microsoft.UpdateServices.Administration.UpdateClassificationCollection
-    $AllWsusClassifications = $WsusServer.GetUpdateClassifications()
-    if ($Classifications -eq '*')
-    {
-        foreach ($Classification in $AllWsusClassifications)
-        {
-            $null = $ClassificationCollection.Add($WsusServer.GetUpdateClassification($Classification.Id))
-        }
-    }
-    else
-    {
-        foreach ($Classification in $Classifications)
-        {
-            if ($WsusClassification = $AllWsusClassifications | Where-Object -FilterScript { $_.ID.Guid -eq $Classification })
+            foreach ($Classification in ($WsusServer.GetSubscription().GetUpdateClassifications().ID.Guid))
             {
-                $null = $ClassificationCollection.Add(
-                    $WsusServer.GetUpdateClassification($WsusClassification.Id)
-                )
+                Get-WsusClassification | Where-Object -FilterScript { $_.Classification.ID -eq $Classification } |
+                    Set-WsusClassification -Disable
+            }
+
+            if ($Synchronize)
+            {
+                Write-Verbose -Message $script:localizedData.RunningInitSync
+                $WsusServer.GetSubscription().StartSynchronizationForCategoryOnly()
+                while ($WsusServer.GetSubscription().GetSynchronizationStatus() -eq 'Running')
+                {
+                    Start-Sleep -Seconds 1
+                }
+
+                if ($WsusServer.GetSubscription().GetSynchronizationHistory()[0].Result -eq 'Succeeded')
+                {
+                    Write-Verbose -Message $script:localizedData.InitSyncSuccess
+                    $WsusConfiguration.OobeInitialized = $true
+                    SaveWsusConfiguration
+                }
+                else
+                {
+                    Write-Verbose -Message $script:localizedData.InitSyncFailure
+                }
             }
             else
             {
-                Write-Verbose -Message ($script:localizedData.ClassificationNotFound -f $Classification)
+                Write-Verbose -Message $script:localizedData.RunningInitOfflineSync
+
+                $TempFile = [IO.Path]::GetTempFileName()
+
+                $CABPath = Join-Path -Path $PSScriptRoot -ChildPath '\WSUS.cab'
+
+                $Arguments = 'import '
+                $Arguments += "`"$CABPath`" $TempFile"
+
+                Write-Verbose -Message ($script:localizedData.WsusUtilArgs -f $Arguments)
+
+                if ($SetupCredential)
+                {
+                    $Process = Start-Win32Process -Path $Path -Arguments $Arguments -Credential $SetupCredential
+                    Write-Verbose -Message [string]$Process
+                    Wait-Win32ProcessEnd -Path $Path -Arguments $Arguments
+                }
+                else
+                {
+                    $Process = Start-Win32Process -Path $Path -Arguments $Arguments
+                    Write-Verbose -Message [string]$Process
+                    Wait-Win32ProcessEnd -Path $Path -Arguments $Arguments
+                }
+
+                $WsusConfiguration.OobeInitialized = $true
+                SaveWsusConfiguration
+            }
+        }
+
+        # Configure WSUS subscription
+        if ($WsusConfiguration.OobeInitialized)
+        {
+            $WsusSubscription = $WsusServer.GetSubscription()
+
+            # Products
+            Write-Verbose -Message $script:localizedData.ConfiguringProducts
+            $ProductCollection = New-Object Microsoft.UpdateServices.Administration.UpdateCategoryCollection
+            $AllWsusProducts = $WsusServer.GetUpdateCategories()
+            if ($Products.Count -eq 1 -and $Products[0] -eq '*')
+            {
+                $null = $ProductCollection.AddRange($AllWsusProducts)
+            }
+            else
+            {
+                $tree = Get-WsusProductTree -Server $WsusServer
+                foreach ($Product in $Products)
+                {
+                    if ($null -ne $tree[$product])
+                    {
+                        $category = $WsusServer.GetUpdateCategory($tree[$product])
+                        $null = $ProductCollection.Add($category)
+                    }
+                }
+            }
+            $WsusSubscription.SetUpdateCategories($ProductCollection)
+
+            # Classifications
+            Write-Verbose -Message $script:localizedData.ConfiguringClassifications
+            $ClassificationCollection = New-Object Microsoft.UpdateServices.Administration.UpdateClassificationCollection
+            $AllWsusClassifications = $WsusServer.GetUpdateClassifications()
+            if ($Classifications -eq '*')
+            {
+                foreach ($Classification in $AllWsusClassifications)
+                {
+                    $null = $ClassificationCollection.Add($WsusServer.GetUpdateClassification($Classification.Id))
+                }
+            }
+            else
+            {
+                foreach ($Classification in $Classifications)
+                {
+                    if ($WsusClassification = $AllWsusClassifications | Where-Object -FilterScript { $_.ID.Guid -eq $Classification })
+                    {
+                        $null = $ClassificationCollection.Add(
+                            $WsusServer.GetUpdateClassification($WsusClassification.Id)
+                        )
+                    }
+                    else
+                    {
+                        Write-Verbose -Message ($script:localizedData.ClassificationNotFound -f $Classification)
+                    }
+                }
+            }
+
+            $WsusSubscription.SetUpdateClassifications($ClassificationCollection)
+
+            #Synchronization Schedule
+            Write-Verbose -Message $script:localizedData.ConfiguringSyncSchedule
+            $WsusSubscription.SynchronizeAutomatically = $SynchronizeAutomatically
+            if ($PSBoundParameters.ContainsKey('SynchronizeAutomaticallyTimeOfDay'))
+            {
+                $WsusSubscription.SynchronizeAutomaticallyTimeOfDay = $SynchronizeAutomaticallyTimeOfDay
+            }
+
+            $WsusSubscription.NumberOfSynchronizationsPerDay = $SynchronizationsPerDay
+            $WsusSubscription.Save()
+
+            if ($Synchronize)
+            {
+                Write-Verbose -Message $script:localizedData.SynchronizingWsus
+
+                $WsusServer.GetSubscription().StartSynchronization()
+                while ($WsusServer.GetSubscription().GetSynchronizationStatus() -eq 'Running')
+                {
+                    Start-Sleep -Seconds 1
+                }
+
+                if ($WsusServer.GetSubscription().GetSynchronizationHistory()[0].Result -eq 'Succeeded')
+                {
+                    Write-Verbose -Message $script:localizedData.InitSyncSuccess
+                }
+                else
+                {
+                    Write-Verbose -Message $script:localizedData.InitSyncFailure
+                }
             }
         }
     }
 
-    $WsusSubscription.SetUpdateClassifications($ClassificationCollection)
-
-    #Synchronization Schedule
-    Write-Verbose -Message $script:localizedData.ConfiguringSyncSchedule
-    $WsusSubscription.SynchronizeAutomatically = $SynchronizeAutomatically
-    if ($PSBoundParameters.ContainsKey('SynchronizeAutomaticallyTimeOfDay'))
+    if (-not (Test-TargetResource @PSBoundParameters))
     {
-        $WsusSubscription.SynchronizeAutomaticallyTimeOfDay = $SynchronizeAutomaticallyTimeOfDay
+        $errorMessage = $script:localizedData.TestFailedAfterSet
+        New-InvalidResultException -Message $errorMessage -ErrorRecord $_
     }
-
-    $WsusSubscription.NumberOfSynchronizationsPerDay = $SynchronizationsPerDay
-    $WsusSubscription.Save()
-
-    if ($Synchronize)
-    {
-        Write-Verbose -Message $script:localizedData.SynchronizingWsus
-
-        $WsusServer.GetSubscription().StartSynchronization()
-        while ($WsusServer.GetSubscription().GetSynchronizationStatus() -eq 'Running')
-        {
-            Start-Sleep -Seconds 1
-        }
-
-        if ($WsusServer.GetSubscription().GetSynchronizationHistory()[0].Result -eq 'Succeeded')
-        {
-            Write-Verbose -Message $script:localizedData.InitSyncSuccess
-        }
-        else
-        {
-            Write-Verbose -Message $script:localizedData.InitSyncFailure
-        }
-    }
-}
-}
-
-if (-not (Test-TargetResource @PSBoundParameters))
-{
-    $errorMessage = $script:localizedData.TestFailedAfterSet
-    New-InvalidResultException -Message $errorMessage -ErrorRecord $_
-}
 }
 
 <#
