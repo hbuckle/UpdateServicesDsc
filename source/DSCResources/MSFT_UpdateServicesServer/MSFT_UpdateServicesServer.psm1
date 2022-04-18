@@ -160,7 +160,13 @@ function Get-TargetResource
             }
         }
 
-        Write-Verbose -Message ($script:localizedData.WsusProducts -f $Products)
+        $ComputerGroups = @()
+        $WsusServer.GetComputerTargetGroups() | Where-Object { $_.Name -notin @('All Computers', 'Unassigned Computers') } | ForEach-Object {
+            $ComputerGroups += $_.Name
+        }
+
+        Write-Verbose -Message ($script:localizedData.WsusProducts -f ($Products -join ','))
+        Write-Verbose -Message ($script:localizedData.ComputerGroups -f ($ComputerGroups -join ','))
         Write-Verbose -Message $script:localizedData.GettingWsusSyncConfig
         $SynchronizeAutomatically = $WsusSubscription.SynchronizeAutomatically
         Write-Verbose -Message ($script:localizedData.WsusSyncAuto -f $SynchronizeAutomatically)
@@ -188,6 +194,7 @@ function Get-TargetResource
         Languages                         = $Languages
         Products                          = $Products
         Classifications                   = $Classifications
+        ComputerGroups                    = $ComputerGroups
         SynchronizeAutomatically          = $SynchronizeAutomatically
         SynchronizeAutomaticallyTimeOfDay = $SynchronizeAutomaticallyTimeOfDay
         SynchronizationsPerDay            = $SynchronizationsPerDay
@@ -337,6 +344,10 @@ function Set-TargetResource
         [Parameter()]
         [System.String[]]
         $Classifications = @('E6CF1350-C01B-414D-A61F-263D14D133B4', 'E0789628-CE08-4437-BE74-2495B842F43B', '0FA1201D-4330-4FA8-8AE9-B877473B6441'),
+
+        [Parameter()]
+        [System.String[]]
+        $ComputerGroups = @(),
 
         [Parameter()]
         [System.Boolean]
@@ -626,6 +637,24 @@ function Set-TargetResource
                 }
             }
 
+            # Computer Groups
+            $currentGroups = @()
+            $currentGroups += $WsusServer.GetComputerTargetGroups() | Where-Object { $_.Name -notin @('All Computers', 'Unassigned Computers') } |
+                Select-Object -ExpandProperty Name
+            foreach ($group in $ComputerGroups)
+            {
+                if ($group -notin $currentGroups)
+                {
+                    $null = $WsusServer.CreateComputerTargetGroup($group)
+                }
+            }
+            $WsusServer.GetComputerTargetGroups() | Where-Object { $_.Name -notin @('All Computers', 'Unassigned Computers') } | ForEach-Object {
+                if ($_.Name -notin $ComputerGroups)
+                {
+                    $_.Delete()
+                }
+            }
+
             $WsusSubscription.SetUpdateClassifications($ClassificationCollection)
 
             #Synchronization Schedule
@@ -811,6 +840,10 @@ function Test-TargetResource
         $Classifications = @('E6CF1350-C01B-414D-A61F-263D14D133B4', 'E0789628-CE08-4437-BE74-2495B842F43B', '0FA1201D-4330-4FA8-8AE9-B877473B6441'),
 
         [Parameter()]
+        [System.String[]]
+        $ComputerGroups = @(),
+
+        [Parameter()]
         [System.Boolean]
         $SynchronizeAutomatically,
 
@@ -952,6 +985,13 @@ function Test-TargetResource
                     -DifferenceObject ($Classifications | Sort-Object -Unique) -SyncWindow 0))
         {
             Write-Verbose -Message $script:localizedData.ClassificationsTestFailed
+            $result = $false
+        }
+
+        # Test Computer Groups
+        if ($null -ne (Compare-Object -ReferenceObject ($Wsus.ComputerGroups | Sort-Object) -DifferenceObject ($ComputerGroups | Sort-Object)))
+        {
+            Write-Verbose -Message $script:localizedData.ComputerGroupsTestFailed
             $result = $false
         }
 
